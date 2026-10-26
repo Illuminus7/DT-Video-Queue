@@ -31,6 +31,21 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(VideoTiming.seconds(frames: 362, family: .h3), 362.0 / 24)
     }
 
+    func testImageModeRouting() {
+        var line = VideoLine(); line.startImage = "1.png"; line.endImage = "2.png"; line.image3 = "3.png"; line.image4 = "4.png"
+        let flva = ImageMode(modelFile: "example_h3_fl2va.ckpt")
+        XCTAssertEqual(flva, .startEnd)
+        XCTAssertEqual(flva.images(for: line).initImage, "1.png")
+        XCTAssertEqual(flva.images(for: line).moodboard, ["2.png"])
+        let refva = ImageMode(modelFile: "example_h3_refva.ckpt")
+        XCTAssertEqual(refva, .moodboard)
+        XCTAssertNil(refva.images(for: line).initImage)
+        XCTAssertEqual(refva.images(for: line).moodboard, ["1.png", "2.png", "3.png", "4.png"])
+        let other = ImageMode(modelFile: "example_ltx.ckpt")
+        XCTAssertEqual(other, .standard)
+        XCTAssertEqual(other.images(for: line).moodboard, ["2.png", "3.png", "4.png"])
+    }
+
     func testProtobufUnknownFieldsAndTruncation() throws {
         var p = Proto(); p.string(5, "hello"); p.integer(14, 1); p.bytes(127, Data([1, 2, 3]))
         let fields = try Proto.fields(p.data)
@@ -40,13 +55,14 @@ final class ProtocolTests: XCTestCase {
     }
 
     func testConfigurationWireFields() throws {
-        var project = Project(); project.modelFile = "minimax_h3_fl2va_i8x.ckpt"
+        var project = Project(); project.modelFile = "example_h3_fl2va.ckpt"
         project.frameCount = 22
         project.solAttentionEnabled = false; project.solAttentionStart = 3; project.solAttentionTau = 0.75
         project.teaCacheEnabled = false; project.teaCacheStart = 1; project.teaCacheEnd = 4
         project.teaCacheThreshold = 0.12; project.teaCacheMaxSkipSteps = 7
+        project.lora4File = "example_lora_4.ckpt"; project.lora4Strength = 0.5
         project = try JSONDecoder().decode(Project.self, from: JSONEncoder().encode(project))
-        project.size = .extraSmall; project.lora1File = "test.ckpt"; project.lora1Strength = 0.75
+        project.size = .extraSmall; project.lora1File = "example_lora_1.ckpt"; project.lora1Strength = 0.75
         let data = ConfigBuffer.configuration(project, family: .h3)
         let root = Int(try data.readLE(UInt32.self, at: 0))
         let vt = root - Int(try data.readLE(Int32.self, at: root))
@@ -64,11 +80,13 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(try data.readLE(UInt32.self, at: field(90)), 3)
         XCTAssertEqual(Float(bitPattern: try data.readLE(UInt32.self, at: field(91))), 0.75)
         let loraSlot = try field(20), vector = loraSlot + Int(try data.readLE(UInt32.self, at: loraSlot))
-        XCTAssertEqual(try data.readLE(UInt32.self, at: vector), 1)
-        let slot = vector + 4, table = slot + Int(try data.readLE(UInt32.self, at: slot))
-        let loraVT = table - Int(try data.readLE(Int32.self, at: table))
-        let weight = table + Int(try data.readLE(UInt16.self, at: loraVT + 6))
-        XCTAssertEqual(Float(bitPattern: try data.readLE(UInt32.self, at: weight)), 0.75)
+        XCTAssertEqual(try data.readLE(UInt32.self, at: vector), 2)
+        for (index, expected) in [Float(0.75), 0.5].enumerated() {
+            let slot = vector + 4 + index * 4, table = slot + Int(try data.readLE(UInt32.self, at: slot))
+            let loraVT = table - Int(try data.readLE(Int32.self, at: table))
+            let weight = table + Int(try data.readLE(UInt16.self, at: loraVT + 6))
+            XCTAssertEqual(Float(bitPattern: try data.readLE(UInt32.self, at: weight)), expected)
+        }
     }
 
     private func header(codec: UInt32, dimensions: [Int], type: Int32 = 0x4000) -> Data {

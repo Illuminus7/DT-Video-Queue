@@ -139,9 +139,7 @@ struct ConfigBuffer {
         buffer.byte(root, 89, project.solAttentionEnabled ? 1 : 0)
         buffer.uint(root, 90, UInt32(clamping: project.solAttentionStart))
         buffer.float(root, 91, Float(project.solAttentionTau))
-        let loras = [(project.lora1File, project.lora1Strength), (project.lora2File, project.lora2Strength)].compactMap { file, weight -> (String, Double)? in
-            file.map { ($0, weight) }
-        }
+        let loras = project.loras
         let slot = buffer.field(root, 20)
         buffer.align(4)
         buffer.data.putLE(UInt32(buffer.data.count - slot), at: slot)

@@ -9,9 +9,15 @@ A native SwiftUI macOS app that queues videos using Draw Things’ gRPC server. 
 
 A prebuilt `DT Video Queue.app` is included in this repository (Apple Silicon, macOS 14+). It is ad-hoc signed and not notarized, so on first launch macOS may block it; allow it in **System Settings → Privacy & Security → Open Anyway**. macOS may also ask to let the app access data from other apps; allow it so the app can read Draw Things' model list. To build it yourself, run `./scripts/build-app.sh`. In Draw Things, enable **API Server → gRPC**, set port **7859**, and enable **TLS**. Keep Draw Things open. The app defaults to `127.0.0.1:7859`; change the host, port, or TLS setting in **Settings**. Shared Secret must be disabled for this connection.
 
-The app reads installed H3/LTX models and compatible LoRAs from Draw Things’ model JSON registries. If macOS blocks folder access, use **Models Folder…** to select `~/Library/Containers/com.liuliu.draw-things/Data/Documents/Models`. The server must have the selected files installed; the app checks them before generation.
+The app reads installed H3/LTX models and compatible LoRAs from Draw Things’ model JSON registries. If you keep models in an external folder in Draw Things, use **Models Folder…** to select it; the model list (`custom.json`, `custom_lora.json`) is still read from Draw Things' own Models folder. If macOS blocks access to that list, use **Models Folder…** to select `~/Library/Containers/com.liuliu.draw-things/Data/Documents/Models`. The server must have the selected files installed; the app checks them before generation.
 
-Add prompts and optional **Image 1**/**Image 2** reference images, choose the global settings and output folder, then press **Go**. Videos run sequentially. Image 1 is sent as the primary image tensor; Image 2 is sent as the first `shuffle` (moodboard) hint, and requires Image 1. Exact endpoint conditioning depends on the selected model; the H3 FL2VA model supports both. Reference images are scaled and center-cropped to the chosen dimensions.
+Add prompts and optional **Image 1**–**Image 4** reference images, choose the global settings (including up to four LoRAs) and output folder, then press **Go**. Videos run sequentially. How the images are used depends on the selected model:
+
+- **H3 FL2VA** (`fl2va` in the file name): Image 1 is the start frame and Image 2 the end frame (sent as the primary image and the first `shuffle` hint). Images 3–4 are dimmed and not sent.
+- **H3 RefVA** (`refva` in the file name): Images 1–4 are all sent together as one `shuffle` (moodboard) hint, with no start frame.
+- **Other models**: Image 1 is sent as the primary image; Images 2–4 are sent together as one `shuffle` (moodboard) hint and require Image 1.
+
+The Terminal shows which images were sent for each video. Reference images are scaled and center-cropped to the chosen dimensions.
 
 The server streams frames and optional generated audio. The app writes H.264 `.mov` movies using macOS AVFoundation, preserving generated audio. The global **Frames** selector defaults to 124 and offers H3-valid counts: 1, or 5–362 in increments of 17 (5, 22, 39, …, 362). The adjacent duration is frames divided by 24 FPS for H3, or 25 FPS for LTX. The selected count is sent to the server and saved with projects; older projects default to 124. H3 audio uses 32 kHz; LTX 2 uses 24 kHz and LTX 2.3 uses 48 kHz.
 

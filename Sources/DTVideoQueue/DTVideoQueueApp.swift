@@ -7,6 +7,34 @@ import UniformTypeIdentifiers
 
 enum Family: String, Codable { case h3 = "H3", ltx = "LTX" }
 
+/// How a line's images are sent, based on the selected model file.
+enum ImageMode {
+    /// H3 FL2VA: Image 1 is the first frame, Image 2 the last; Images 3–4 are unused.
+    case startEnd
+    /// H3 RefVA: every image is a moodboard reference.
+    case moodboard
+    /// Other models: Image 1 is the init image, Images 2–4 are moodboard references.
+    case standard
+
+    init(modelFile: String?) {
+        let file = modelFile?.lowercased() ?? ""
+        if file.contains("refva") { self = .moodboard }
+        else if file.contains("fl2va") || file.contains("flva") { self = .startEnd }
+        else { self = .standard }
+    }
+
+    /// Image 1 (init) and moodboard images for a line under this mode.
+    func images(for line: VideoLine) -> (initImage: String?, moodboard: [String]) {
+        switch self {
+        case .startEnd: return (line.startImage, [line.endImage].compactMap { $0 })
+        case .moodboard: return (nil, [line.startImage, line.endImage, line.image3, line.image4].compactMap { $0 })
+        case .standard: return (line.startImage, [line.endImage, line.image3, line.image4].compactMap { $0 })
+        }
+    }
+
+    func usesSlot(_ slot: Int) -> Bool { self != .startEnd || slot <= 2 }
+}
+
 struct ModelItem: Identifiable, Hashable {
     let file: String
     let name: String
@@ -53,6 +81,8 @@ struct VideoLine: Identifiable, Codable {
     var id = UUID()
     var startImage: String? = nil
     var endImage: String? = nil
+    var image3: String? = nil
+    var image4: String? = nil
     var prompt = ""
 }
 
@@ -60,8 +90,16 @@ struct Project: Codable {
     var modelFile: String? = nil
     var lora1File: String? = nil
     var lora2File: String? = nil
+    var lora3File: String? = nil
+    var lora4File: String? = nil
     var lora1Strength = 1.0
     var lora2Strength = 1.0
+    var lora3Strength = 1.0
+    var lora4Strength = 1.0
+    var loras: [(file: String, strength: Double)] {
+        [(lora1File, lora1Strength), (lora2File, lora2Strength), (lora3File, lora3Strength), (lora4File, lora4Strength)]
+            .compactMap { file, strength in file.map { ($0, strength) } }
+    }
     var size: VideoSize = .normal
     var aspectRatio: AspectRatio = .portrait
     var steps = 6
@@ -95,7 +133,7 @@ struct Project: Codable {
     private enum CodingKeys: String, CodingKey {
         case solAttentionEnabled, solAttentionStart, solAttentionTau
         case teaCacheEnabled, teaCacheStart, teaCacheEnd, teaCacheThreshold, teaCacheMaxSkipSteps
-        case modelFile, lora1File, lora2File, lora1Strength, lora2Strength, size, aspectRatio, steps, frameCount, server, outputFolder, lines
+        case modelFile, lora1File, lora2File, lora3File, lora4File, lora1Strength, lora2Strength, lora3Strength, lora4Strength, size, aspectRatio, steps, frameCount, server, outputFolder, lines
     }
 
     init(from decoder: Decoder) throws {
@@ -103,8 +141,12 @@ struct Project: Codable {
         modelFile = try values.decodeIfPresent(String.self, forKey: .modelFile)
         lora1File = try values.decodeIfPresent(String.self, forKey: .lora1File)
         lora2File = try values.decodeIfPresent(String.self, forKey: .lora2File)
+        lora3File = try values.decodeIfPresent(String.self, forKey: .lora3File)
+        lora4File = try values.decodeIfPresent(String.self, forKey: .lora4File)
         lora1Strength = try values.decodeIfPresent(Double.self, forKey: .lora1Strength) ?? 1
         lora2Strength = try values.decodeIfPresent(Double.self, forKey: .lora2Strength) ?? 1
+        lora3Strength = try values.decodeIfPresent(Double.self, forKey: .lora3Strength) ?? 1
+        lora4Strength = try values.decodeIfPresent(Double.self, forKey: .lora4Strength) ?? 1
         size = try values.decodeIfPresent(VideoSize.self, forKey: .size) ?? .normal
         aspectRatio = try values.decodeIfPresent(AspectRatio.self, forKey: .aspectRatio) ?? .portrait
         steps = try values.decodeIfPresent(Int.self, forKey: .steps) ?? 6
@@ -151,14 +193,17 @@ private enum Catalog {
         return nil
     }
 
+    /// The JSON registries always live in Draw Things' own Models folder, even when the model files
+    /// are stored in an external folder, so only the file check looks in `directory`.
     static func entries(named name: String, in directory: URL) -> [ModelItem] {
-        let files = [directory.appendingPathComponent(name), cache.appendingPathComponent(name == "custom.json" ? "models.json" : "loras.json")]
+        let files = [defaultDirectory.appendingPathComponent(name), cache.appendingPathComponent(name == "custom.json" ? "models.json" : "loras.json")]
+        let folders = directory.standardizedFileURL == defaultDirectory.standardizedFileURL ? [directory] : [directory, defaultDirectory]
         var result: [String: ModelItem] = [:]
         for source in files {
             for record in load(source) {
                 guard let file = record["file"] as? String,
                       let family = family(record["version"] as? String ?? "", file),
-                      FileManager.default.fileExists(atPath: directory.appendingPathComponent(file).path) else { continue }
+                      folders.contains(where: { FileManager.default.fileExists(atPath: $0.appendingPathComponent(file).path) }) else { continue }
                 let title = record["name"] as? String ?? file
                 result[file] = ModelItem(file: file, name: title, family: family)
             }
@@ -247,18 +292,19 @@ private enum Catalog {
     }
 
     var family: Family? { models.first { $0.file == project.modelFile }?.family }
+    var imageMode: ImageMode { ImageMode(modelFile: project.modelFile) }
     var availableLoras: [ModelItem] { loras.filter { $0.family == family } }
 
     func refreshCatalog() {
         models = Catalog.entries(named: "custom.json", in: modelsDirectory)
         loras = Catalog.entries(named: "custom_lora.json", in: modelsDirectory)
-        let modelJSON = modelsDirectory.appendingPathComponent("custom.json")
-        let loraJSON = modelsDirectory.appendingPathComponent("custom_lora.json")
+        let modelJSON = Catalog.defaultDirectory.appendingPathComponent("custom.json")
+        let loraJSON = Catalog.defaultDirectory.appendingPathComponent("custom_lora.json")
         if !FileManager.default.isReadableFile(atPath: modelJSON.path) ||
            !FileManager.default.isReadableFile(atPath: loraJSON.path) {
-            catalogMessage = "Draw Things model metadata is not readable. Choose the Models folder to grant access."
+            catalogMessage = "Draw Things' model list is not readable. Allow access to data from other apps, or choose Draw Things' own Models folder to grant access."
         } else if models.isEmpty {
-            catalogMessage = "No installed H3 or LTX models were found in this Models folder."
+            catalogMessage = "No installed H3 or LTX models were found in \(modelsDirectory.lastPathComponent)."
         } else {
             catalogMessage = nil
         }
@@ -275,11 +321,6 @@ private enum Catalog {
         panel.directoryURL = modelsDirectory
         panel.prompt = "Use Models Folder"
         guard panel.runModal() == .OK, let folder = panel.url else { return }
-        guard FileManager.default.fileExists(atPath: folder.appendingPathComponent("custom.json").path),
-              FileManager.default.fileExists(atPath: folder.appendingPathComponent("custom_lora.json").path) else {
-            message = "Choose the Draw Things Models folder containing custom.json and custom_lora.json."
-            return
-        }
         if hasFolderAccess { modelsDirectory.stopAccessingSecurityScopedResource() }
         modelsDirectory = folder
         hasFolderAccess = folder.startAccessingSecurityScopedResource()
@@ -293,6 +334,8 @@ private enum Catalog {
         let choices = Set(availableLoras.map(\.file))
         if let file = project.lora1File, !choices.contains(file) { project.lora1File = nil }
         if let file = project.lora2File, !choices.contains(file) { project.lora2File = nil }
+        if let file = project.lora3File, !choices.contains(file) { project.lora3File = nil }
+        if let file = project.lora4File, !choices.contains(file) { project.lora4File = nil }
     }
 
     func newProject() {
@@ -346,7 +389,7 @@ private enum Catalog {
         guard !server.host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
               (1...65535).contains(server.port) else { message = "Enter a server address and a port between 1 and 65535 in Settings."; return }
         guard project.modelFile != nil else { message = "Choose an installed H3 or LTX model."; return }
-        guard project.lora1Strength.isFinite, project.lora2Strength.isFinite else {
+        guard [project.lora1Strength, project.lora2Strength, project.lora3Strength, project.lora4Strength].allSatisfy(\.isFinite) else {
             message = "LoRA strengths must be valid numbers."; return
         }
         guard (1...200).contains(project.steps) else {
@@ -359,11 +402,12 @@ private enum Catalog {
         let lines = project.lines.filter { !$0.prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
         guard !lines.isEmpty else { message = "Enter a prompt for at least one line."; return }
         for line in lines {
-            for path in [line.startImage, line.endImage].compactMap({ $0 }) where !FileManager.default.fileExists(atPath: path) {
+            let images = imageMode.images(for: line)
+            for path in ([images.initImage].compactMap { $0 } + images.moodboard) where !FileManager.default.fileExists(atPath: path) {
                 message = "Image file is missing: \(path)"; return
             }
-            if line.endImage != nil && line.startImage == nil {
-                message = "Add Image 1 before Image 2."; return
+            if imageMode != .moodboard && !images.moodboard.isEmpty && images.initImage == nil {
+                message = imageMode == .startEnd ? "Add Image 1 (start) before Image 2 (end)." : "Add Image 1 before Images 2–4."; return
             }
         }
         if project.outputFolder == nil { chooseOutputFolder() }
@@ -556,6 +600,10 @@ private struct MainView: View {
                     loraPicker("LoRA 1", selection: $store.project.lora1File, strength: $store.project.lora1Strength)
                     loraPicker("LoRA 2", selection: $store.project.lora2File, strength: $store.project.lora2Strength)
                 }
+                HStack(spacing: 18) {
+                    loraPicker("LoRA 3", selection: $store.project.lora3File, strength: $store.project.lora3Strength)
+                    loraPicker("LoRA 4", selection: $store.project.lora4File, strength: $store.project.lora4Strength)
+                }
                 HStack(spacing: 8) {
                     Image(systemName: "folder").foregroundStyle(.secondary)
                     Text(store.project.outputFolder ?? "Choose a folder for generated movies")
@@ -579,7 +627,7 @@ private struct MainView: View {
                 LazyVStack(spacing: 10) {
                     ForEach($store.project.lines) { $line in
                         LineView(line: $line, number: (store.project.lines.firstIndex(where: { $0.id == line.id }) ?? 0) + 1,
-                                 selected: store.selectedLine == line.id)
+                                 selected: store.selectedLine == line.id, mode: store.imageMode)
                             .onTapGesture { store.selectedLine = line.id }
                     }
                 }.padding(.horizontal, 25).padding(.bottom, 16)
@@ -636,13 +684,28 @@ private struct LineView: View {
     @Binding var line: VideoLine
     let number: Int
     let selected: Bool
+    let mode: ImageMode
+
+    private func slot(_ number: Int, _ path: Binding<String?>) -> some View {
+        let help: String
+        switch mode {
+        case .startEnd: help = number == 1 ? "Start frame" : number == 2 ? "End frame" : "Not used by FL2VA models"
+        case .moodboard: help = "Moodboard reference"
+        case .standard: help = number == 1 ? "Starting image" : "Moodboard reference"
+        }
+        return ImageDropView(title: "Image \(number)", symbol: number == 1 ? "photo.badge.plus" : "photo.on.rectangle.angled", path: path)
+            .opacity(mode.usesSlot(number) ? 1 : 0.35)
+            .help(help)
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
             Text(String(format: "%02d", number)).font(.system(.title3, design: .rounded, weight: .bold))
                 .foregroundStyle(.secondary).frame(width: 35, alignment: .leading).padding(.top, 8)
-            ImageDropView(title: "Image 1", symbol: "photo.badge.plus", path: $line.startImage)
-            ImageDropView(title: "Image 2", symbol: "photo.on.rectangle.angled", path: $line.endImage)
+            slot(1, $line.startImage)
+            slot(2, $line.endImage)
+            slot(3, $line.image3)
+            slot(4, $line.image4)
             VStack(alignment: .leading, spacing: 6) {
                 Text("Prompt").font(.caption).foregroundStyle(.secondary)
                 TextEditor(text: $line.prompt)

@@ -88,7 +88,7 @@ final class GRPCVideoClient {
         if let error = project.optimizationError { throw VideoError.failure(error) }
         try checkConnection()
         // Verify chosen files on the server; never upload or download models automatically.
-        let files = [project.modelFile, project.lora1File, project.lora2File].compactMap { $0 }
+        let files = [project.modelFile].compactMap { $0 } + project.loras.map(\.file)
         var query = Proto(); for file in files { query.string(1, file) }
         var fileOptions = options; fileOptions.timeLimit = .timeout(.seconds(15))
         let existence: UnaryCall<RPCMessage, RPCMessage> = channel.makeUnaryCall(path: "/ImageGenerationService/FilesExist", request: RPCMessage(query.data), callOptions: fileOptions)
@@ -106,15 +106,25 @@ final class GRPCVideoClient {
         request.bytes(7, ConfigBuffer.configuration(project, family: family))
         request.string(10, "DT Video Queue"); request.integer(11, 2); request.integer(14, 1)
         let size = project.dimensions
-        if let path = line.startImage {
+        // Tensors are sent once in `contents` and referenced elsewhere by SHA-256.
+        var sent = Set<Data>()
+        func attach(_ path: String) throws -> Data {
             let tensor = try ImageTensor.image(at: path, width: size.width, height: size.height)
-            request.bytes(1, Data(SHA256.hash(data: tensor))); request.bytes(12, tensor)
+            let hash = Data(SHA256.hash(data: tensor))
+            if sent.insert(hash).inserted { request.bytes(12, tensor) }
+            return hash
         }
-        if let path = line.endImage {
-            let tensor = try ImageTensor.image(at: path, width: size.width, height: size.height)
-            var weighted = Proto(); weighted.bytes(1, Data(SHA256.hash(data: tensor))); weighted.float(2, 1)
-            var hint = Proto(); hint.string(1, "shuffle"); hint.bytes(2, weighted.data)
-            request.bytes(4, hint.data); request.bytes(12, tensor)
+        let mode = ImageMode(modelFile: project.modelFile)
+        let images = mode.images(for: line)
+        if let path = images.initImage { request.bytes(1, try attach(path)) }
+        if !images.moodboard.isEmpty {
+            // Moodboard images share one shuffle hint, each at full weight.
+            var hint = Proto(); hint.string(1, "shuffle")
+            for path in images.moodboard {
+                var weighted = Proto(); weighted.bytes(1, try attach(path)); weighted.float(2, 1)
+                hint.bytes(2, weighted.data)
+            }
+            request.bytes(4, hint.data)
         }
         let exporter = try MovieExporter(output: output, width: size.width, height: size.height, fps: family == .h3 ? 24 : 25)
         var partialImage = Data(), partialAudio = Data()
@@ -122,6 +132,11 @@ final class GRPCVideoClient {
         var audio: [ImageTensor] = []
         log("Sol Attention: \(project.solAttentionEnabled ? "on" : "off") · start \(project.solAttentionStart) · Tau \(project.solAttentionTau)\n")
         log("TeaCache: \(project.teaCacheEnabled ? "on" : "off") · steps \(project.teaCacheStart)–\(project.teaCacheEnd) · threshold \(project.teaCacheThreshold) · max skip \(project.teaCacheMaxSkipSteps)\n")
+        switch mode {
+        case .startEnd: log("Images (FL2VA): \(images.initImage == nil ? "no start" : "start") · \(images.moodboard.isEmpty ? "no end" : "end")\(line.image3 != nil || line.image4 != nil ? " · Images 3–4 ignored" : "")\n")
+        case .moodboard: log("Images (RefVA): \(images.moodboard.count) moodboard\n")
+        case .standard: log("Images: \(images.initImage == nil ? "no starting image" : "starting image") · \(images.moodboard.count) moodboard\n")
+        }
         log("Generating \(project.frameCount) frames…\n")
         var generationOptions = options; generationOptions.timeLimit = .timeout(.hours(2))
         let call: ServerStreamingCall<RPCMessage, RPCMessage> = channel.makeServerStreamingCall(path: "/ImageGenerationService/GenerateImage", request: RPCMessage(request.data), callOptions: generationOptions) { response in
