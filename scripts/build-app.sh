@@ -5,6 +5,8 @@ swift build -c release --scratch-path /private/tmp/dt-video-queue-build
 bundle="${PWD}/DT Video Queue.app"
 mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp "$(swift build -c release --scratch-path /private/tmp/dt-video-queue-build --show-bin-path)/DTVideoQueue" "$bundle/Contents/MacOS/DTVideoQueue"
+# Strip debug symbols: they record the build folder (which includes the user name) in the binary.
+strip -S "$bundle/Contents/MacOS/DTVideoQueue"
 resource_bundle="$(swift build -c release --scratch-path /private/tmp/dt-video-queue-build --show-bin-path)/DTVideoQueue_DTVideoQueue.bundle"
 cp -R "$resource_bundle" "$bundle/Contents/Resources/"
 cp THIRD_PARTY_NOTICES.txt "$bundle/Contents/Resources/"
